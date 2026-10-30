@@ -1,43 +1,64 @@
 # ContactWave
 
-ContactWave is a lightweight communication app starter built for:
-- texting contacts from a contact list
-- initiating webcam and microphone calls
-- real-time messaging with a simple socket-based backend
+ContactWave is a real-time communication app starter with:
+- Google or phone-based sign-in flow
+- real-time messaging with Socket.IO
+- webcam and microphone calling via WebRTC
+- contact list and in-app presence status
 
-## Stack
+## Tech stack
 - Frontend: React + TypeScript + Vite
 - Backend: Express + Socket.IO
-- Real-time calling: browser WebRTC
+- Real-time calls: WebRTC
+- Auth: ready for Google OAuth / phone OTP integration in a demo-friendly flow
 
 ## Prerequisites
 - Node.js 18+
 - npm
 
-## Run locally
+## Local setup
 
-1. Install dependencies:
+1. Install root dependencies:
    ```bash
    npm install
    ```
 
-2. Start the app:
+2. Install app dependencies:
    ```bash
-   npm run dev
+   npm --prefix server install
+   npm --prefix client install
    ```
 
-3. Open the frontend in your browser:
+3. Start the server:
+   ```bash
+   npm --prefix server run dev
+   ```
+
+4. Start the frontend in another terminal:
+   ```bash
+   npm --prefix client run dev -- --host 0.0.0.0
+   ```
+
+5. Open the app in the browser:
    - http://localhost:5173
 
-The backend runs on:
-- http://localhost:4000
+## Demo auth flow
 
-## Features included
-- contact list
-- direct messaging
-- online presence messaging
-- webcam + microphone call initiation
-- browser-based peer-to-peer signaling using Socket.IO
+This starter includes a demo-friendly authentication flow:
+- Google sign-in: accepts a name and email and creates a signed-in session
+- Phone sign-in: sends a demo OTP (123456) and verifies it before login
+
+For production use, replace the demo endpoints with real Google OAuth and Twilio / Firebase phone auth.
+
+## Real-time features
+- text chat across users connected through Socket.IO
+- presence updates
+- call negotiation using WebRTC offer/answer and ICE candidates
 
 ## Notes
-This project is intentionally built as a starter app. It demonstrates the core flow for chat and video calling and can be expanded with authentication, persistent storage, and a production-grade call setup.
+This repo is intentionally structured as a working MVP foundation for a messaging app. It’s built to be extended with:
+- user accounts and persistence
+- database storage
+- push notifications
+- encrypted end-to-end messaging
+- production-grade call signaling
