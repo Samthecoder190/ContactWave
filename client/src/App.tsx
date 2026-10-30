@@ -1,13 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { io, type Socket } from 'socket.io-client';
-
-type User = {
-  id: string;
-  name: string;
-  email?: string | null;
-  phone?: string | null;
-  provider?: string;
-};
+import { useEffect, useRef, useState } from 'react';
+import { io, Socket } from 'socket.io-client';
 
 type Contact = {
   id: number;
@@ -16,7 +8,7 @@ type Contact = {
   avatar: string;
 };
 
-type ChatMessage = {
+type Message = {
   id: string;
   from: string;
   to: string;
@@ -24,455 +16,363 @@ type ChatMessage = {
   timestamp: string;
 };
 
-const serverUrl = 'http://localhost:4000';
+const API_BASE = 'http://localhost:4000';
 
 export default function App() {
-  const [authMode, setAuthMode] = useState<'google' | 'phone'>('google');
-  const [user, setUser] = useState<User | null>(null);
-  const [users, setUsers] = useState<User[]>([]);
+  const [username, setUsername] = useState('Sam');
+  const [contacts, setContacts] = useState<Contact[]>([]);
   const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [text, setText] = useState('');
-  const [socket, setSocket] = useState<Socket | null>(null);
-  const [googleName, setGoogleName] = useState('');
-  const [googleEmail, setGoogleEmail] = useState('');
-  const [phone, setPhone] = useState('');
-  const [otp, setOtp] = useState('');
-  const [otpSent, setOtpSent] = useState(false);
-  const [demoOtp, setDemoOtp] = useState('');
-  const [error, setError] = useState('');
-  const [callState, setCallState] = useState('Idle');
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [messageText, setMessageText] = useState('');
+  const [socketReady, setSocketReady] = useState(false);
+  const [incomingCall, setIncomingCall] = useState<string | null>(null);
+  const [isCallActive, setIsCallActive] = useState(false);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  const [isCalling, setIsCalling] = useState(false);
+
+  const socketRef = useRef<Socket | null>(null);
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const pendingOfferRef = useRef<RTCSessionDescriptionInit | null>(null);
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
-  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
-
-  const fetchUsers = async () => {
-    const response = await fetch(`${serverUrl}/api/users`);
-    const data = await response.json();
-    setUsers(data.filter((item: User) => item.name !== user?.name));
-  };
-
-  const fetchConversation = async (contactName: string) => {
-    if (!user) return;
-    const response = await fetch(`${serverUrl}/api/messages/${encodeURIComponent(user.name)}/${encodeURIComponent(contactName)}`);
-    const data = await response.json();
-    setMessages(data);
-  };
 
   useEffect(() => {
-    const storedUser = localStorage.getItem('contactwave-user');
-    if (!storedUser) return;
-    try {
-      const parsed = JSON.parse(storedUser) as User;
-      setUser(parsed);
-    } catch {
-      localStorage.removeItem('contactwave-user');
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!user) return;
-    localStorage.setItem('contactwave-user', JSON.stringify(user));
-    fetchUsers();
-  }, [user]);
-
-  useEffect(() => {
-    if (!user || !selectedContact) return;
-    fetchConversation(selectedContact.name);
-  }, [selectedContact, user]);
-
-  useEffect(() => {
-    if (!user) return;
-    const newSocket = io(serverUrl);
-
-    newSocket.on('connect', () => {
-      newSocket.emit('register', user);
+    const socket = io(API_BASE, {
+      transports: ['websocket'],
     });
 
-    newSocket.on('receive-message', (message: ChatMessage) => {
-      setMessages((prev) => {
-        const exists = prev.some((item) => item.id === message.id);
-        if (exists) return prev;
-        return [...prev, message];
-      });
+    socketRef.current = socket;
+
+    socket.on('connect', () => {
+      setSocketReady(true);
+      socket.emit('register', username);
     });
 
-    newSocket.on('incoming-call', ({ from }) => {
-      setCallState(`Incoming call from ${from}`);
+    socket.on('receive-message', (msg: Message) => {
+      setMessages((prev) => [...prev, msg]);
     });
 
-    newSocket.on('incoming-offer', async ({ from, offer }) => {
-      await handleIncomingOffer(from, offer);
+    socket.on('incoming-call', ({ from }) => {
+      setIncomingCall(from);
     });
 
-    newSocket.on('incoming-answer', async ({ from, answer }) => {
-      if (!peerConnectionRef.current) return;
-      await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(answer));
-      setCallState(`Connected with ${from}`);
+    socket.on('incoming-offer', async ({ from, offer }) => {
+      setIncomingCall(from);
+      pendingOfferRef.current = offer;
     });
 
-    newSocket.on('incoming-ice-candidate', async ({ from, candidate }) => {
-      if (!peerConnectionRef.current || !candidate) return;
+    socket.on('incoming-answer', async ({ from, answer }) => {
+      if (!pcRef.current) return;
+
       try {
-        await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch (err) {
-        console.error('ICE candidate error', err);
+        await pcRef.current.setRemoteDescription(new RTCSessionDescription(answer));
+        setIsCallActive(true);
+      } catch (error) {
+        console.error('Error setting remote description:', error);
       }
     });
 
-    setSocket(newSocket);
+    socket.on('incoming-ice-candidate', async ({ from, candidate }) => {
+      if (!pcRef.current) return;
+
+      try {
+        await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (error) {
+        console.error('Error adding ICE candidate:', error);
+      }
+    });
+
+    socket.on('user-status', ({ username: name, online }) => {
+      setContacts((prev) =>
+        prev.map((contact) =>
+          contact.name === name
+            ? { ...contact, status: online ? 'Online' : 'Offline' }
+            : contact
+        )
+      );
+    });
+
+    fetch(`${API_BASE}/api/contacts`)
+      .then((res) => res.json())
+      .then((data) => setContacts(data))
+      .catch((err) => console.error('Failed to fetch contacts:', err));
 
     return () => {
-      newSocket.disconnect();
-      if (peerConnectionRef.current) {
-        peerConnectionRef.current.close();
-        peerConnectionRef.current = null;
-      }
-      if (localStream) {
-        localStream.getTracks().forEach((track) => track.stop());
-      }
+      socket.disconnect();
     };
-  }, [user]);
+  }, [username]);
 
   useEffect(() => {
-    if (!localStream || !localVideoRef.current) return;
-    localVideoRef.current.srcObject = localStream;
+    if (localVideoRef.current && localStream) {
+      localVideoRef.current.srcObject = localStream;
+      localVideoRef.current.muted = true;
+    }
   }, [localStream]);
 
   useEffect(() => {
-    if (!remoteStream || !remoteVideoRef.current) return;
-    remoteVideoRef.current.srcObject = remoteStream;
+    if (remoteVideoRef.current && remoteStream) {
+      remoteVideoRef.current.srcObject = remoteStream;
+    }
   }, [remoteStream]);
 
-  const handleIncomingOffer = async (from: string, offer: RTCSessionDescriptionInit) => {
-    const pc = await createPeerConnection(from);
-    await pc.setRemoteDescription(new RTCSessionDescription(offer));
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-
-    if (socket && user) {
-      socket.emit('answer', {
-        from: user.name,
-        to: from,
-        answer: pc.localDescription,
-      });
-    }
-
-    setCallState(`Connected with ${from}`);
-  };
-
-  const ensureLocalStream = async () => {
-    if (localStream) return localStream;
-    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-    setLocalStream(stream);
-    return stream;
-  };
-
-  const createPeerConnection = async (remoteUserName: string) => {
-    const stream = await ensureLocalStream();
+  const createPeerConnection = async () => {
     const pc = new RTCPeerConnection({
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
     });
 
-    stream.getTracks().forEach((track) => pc.addTrack(track, stream));
-    peerConnectionRef.current = pc;
+    pc.onicecandidate = (event) => {
+      if (!event.candidate || !selectedContact) return;
+      const socket = socketRef.current;
+      if (!socket) return;
 
-    pc.onicecandidate = ({ candidate }) => {
-      if (candidate && socket && user) {
-        socket.emit('ice-candidate', {
-          from: user.name,
-          to: remoteUserName,
-          candidate,
-        });
-      }
+      socket.emit('ice-candidate', {
+        from: username,
+        to: selectedContact.name,
+        candidate: event.candidate,
+      });
     };
 
     pc.ontrack = (event) => {
-      const [remoteMediaStream] = event.streams;
-      setRemoteStream(remoteMediaStream);
+      const [stream] = event.streams;
+      setRemoteStream(stream);
     };
 
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'connected') {
-        setCallState(`Connected with ${remoteUserName}`);
-      }
-    };
-
+    pcRef.current = pc;
     return pc;
   };
 
-  const startVideoCall = async () => {
-    if (!selectedContact || !socket || !user) return;
-    const remoteUserName = selectedContact.name;
-    const pc = await createPeerConnection(remoteUserName);
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
+  const startLocalMedia = async () => {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: true,
+    });
 
-    socket.emit('start-call', { from: user.name, to: remoteUserName });
-    socket.emit('offer', { from: user.name, to: remoteUserName, offer: pc.localDescription });
-    setCallState(`Calling ${remoteUserName}...`);
+    localStreamRef.current = stream;
+    setLocalStream(stream);
+
+    const pc = await createPeerConnection();
+    stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+    return pc;
   };
 
-  const leaveCall = () => {
-    if (peerConnectionRef.current) {
-      peerConnectionRef.current.close();
-      peerConnectionRef.current = null;
+  const callUser = async (contact: Contact) => {
+    if (!socketRef.current) return;
+
+    try {
+      setSelectedContact(contact);
+      setIsCalling(true);
+
+      const pc = await startLocalMedia();
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      socketRef.current.emit('offer', {
+        from: username,
+        to: contact.name,
+        offer: pc.localDescription,
+      });
+    } catch (error) {
+      console.error('Unable to start call:', error);
+      alert('Could not access webcam or microphone.');
     }
-    if (localStream) {
-      localStream.getTracks().forEach((track) => track.stop());
-      setLocalStream(null);
+  };
+
+  const acceptIncomingCall = async () => {
+    if (!incomingCall || !socketRef.current) return;
+
+    try {
+      const contact = contacts.find((c) => c.name === incomingCall);
+      if (contact) setSelectedContact(contact);
+
+      const pc = await startLocalMedia();
+
+      if (pendingOfferRef.current) {
+        await pc.setRemoteDescription(new RTCSessionDescription(pendingOfferRef.current));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+
+        socketRef.current.emit('answer', {
+          from: username,
+          to: incomingCall,
+          answer: pc.localDescription,
+        });
+      }
+    } catch (error) {
+      console.error('Error accepting call:', error);
     }
+  };
+
+  const endCall = () => {
+    if (pcRef.current) {
+      pcRef.current.close();
+      pcRef.current = null;
+    }
+
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((track) => track.stop());
+      localStreamRef.current = null;
+    }
+
+    setLocalStream(null);
     setRemoteStream(null);
-    setCallState('Idle');
+    setIncomingCall(null);
+    setIsCallActive(false);
+    setIsCalling(false);
   };
 
-  const handleGoogleSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setError('');
+  const handleSendMessage = () => {
+    if (!selectedContact || !messageText.trim() || !socketRef.current) return;
 
-    const response = await fetch(`${serverUrl}/api/auth/google`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: googleName, email: googleEmail }),
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      setError(data.message || 'Google sign in failed.');
-      return;
-    }
-
-    setUser(data.user);
-  };
-
-  const requestPhoneOtp = async () => {
-    setError('');
-    const response = await fetch(`${serverUrl}/api/auth/phone/request`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phone, name: 'Phone User' }),
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      setError(data.message || 'Failed to send OTP.');
-      return;
-    }
-
-    setOtpSent(true);
-    setDemoOtp(data.demoCode || '123456');
-  };
-
-  const verifyPhone = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setError('');
-
-    const response = await fetch(`${serverUrl}/api/auth/phone/verify`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phone, otp, name: 'Phone User' }),
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      setError(data.message || 'Phone verification failed.');
-      return;
-    }
-
-    setUser(data.user);
-    setOtp('');
-    setOtpSent(false);
-    setDemoOtp('');
-  };
-
-  const sendMessage = () => {
-    if (!selectedContact || !socket || !user || !text.trim()) return;
-
-    const payload = {
-      from: user.name,
+    const payload: Message = {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      from: username,
       to: selectedContact.name,
-      text: text.trim(),
-    };
-
-    socket.emit('send-message', payload);
-    const optimisticMessage: ChatMessage = {
-      id: `${Date.now()}`,
-      from: user.name,
-      to: selectedContact.name,
-      text: text.trim(),
+      text: messageText.trim(),
       timestamp: new Date().toISOString(),
     };
 
-    setMessages((prev) => [...prev, optimisticMessage]);
-    setText('');
+    socketRef.current.emit('send-message', {
+      from: username,
+      to: selectedContact.name,
+      text: payload.text,
+    });
+
+    setMessages((prev) => [...prev, payload]);
+    setMessageText('');
   };
-
-  const contactList = useMemo<Contact[]>(() => {
-    return users.map((userItem) => ({
-      id: Number(userItem.id || Date.now()) || 1,
-      name: userItem.name,
-      status: 'Online',
-      avatar: userItem.name.charAt(0).toUpperCase(),
-    }));
-  }, [users]);
-
-  useEffect(() => {
-    if (!selectedContact && contactList[0]) {
-      setSelectedContact(contactList[0]);
-    }
-  }, [contactList, selectedContact]);
-
-  const visibleMessages = useMemo(() => {
-    if (!selectedContact || !user) return [];
-    return messages.filter(
-      (message) =>
-        (message.from === user.name && message.to === selectedContact.name) ||
-        (message.from === selectedContact.name && message.to === user.name),
-    );
-  }, [messages, selectedContact, user]);
-
-  const logout = () => {
-    setUser(null);
-    setMessages([]);
-    setSelectedContact(null);
-    localStorage.removeItem('contactwave-user');
-    if (socket) {
-      socket.disconnect();
-      setSocket(null);
-    }
-  };
-
-  if (!user) {
-    return (
-      <div className="auth-shell">
-        <div className="auth-card">
-          <div className="brand-block">
-            <span className="logo">C</span>
-            <h1>ContactWave</h1>
-          </div>
-
-          <div className="auth-toggle">
-            <button type="button" className={authMode === 'google' ? 'active' : ''} onClick={() => setAuthMode('google')}>
-              Google
-            </button>
-            <button type="button" className={authMode === 'phone' ? 'active' : ''} onClick={() => setAuthMode('phone')}>
-              Phone
-            </button>
-          </div>
-
-          {authMode === 'google' ? (
-            <form className="auth-form" onSubmit={handleGoogleSubmit}>
-              <label>
-                Name
-                <input value={googleName} onChange={(event) => setGoogleName(event.target.value)} placeholder="Your name" required />
-              </label>
-              <label>
-                Email
-                <input type="email" value={googleEmail} onChange={(event) => setGoogleEmail(event.target.value)} placeholder="you@example.com" required />
-              </label>
-              <button type="submit">Continue with Google</button>
-            </form>
-          ) : (
-            <form className="auth-form" onSubmit={verifyPhone}>
-              <label>
-                Phone number
-                <input type="tel" value={phone} onChange={(event) => setPhone(event.target.value)} placeholder="+15550000000" required />
-              </label>
-              <button type="button" className="secondary-action" onClick={requestPhoneOtp}>Send OTP</button>
-
-              {otpSent && (
-                <div className="otp-box">
-                  <span>Demo OTP: {demoOtp || '123456'}</span>
-                </div>
-              )}
-
-              <label>
-                Verification code
-                <input value={otp} onChange={(event) => setOtp(event.target.value)} maxLength={6} placeholder="123456" />
-              </label>
-
-              <button type="submit">Verify and continue</button>
-            </form>
-          )}
-
-          {error && <p className="auth-error">{error}</p>}
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand-block">
-          <span className="logo">C</span>
-          <h1>ContactWave</h1>
-        </div>
-
-        <div className="user-chip">
-          <div className="avatar">{user.name.charAt(0).toUpperCase()}</div>
+        <div className="brand-row">
+          <div className="logo">C</div>
           <div>
-            <strong>{user.name}</strong>
-            <small>{user.provider === 'google' ? 'Google account' : 'Phone account'}</small>
+            <h2>ContactWave</h2>
+            <p>Messaging + Video</p>
           </div>
         </div>
 
-        <button className="logout-button" onClick={logout}>Log out</button>
+        <div className="user-box">
+          <label>Display name</label>
+          <input
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            placeholder="Your name"
+          />
+          <button
+            className="primary"
+            onClick={() => {
+              if (socketRef.current) {
+                socketRef.current.emit('register', username);
+              }
+            }}
+          >
+            {socketReady ? 'Refresh profile' : 'Connect'}
+          </button>
+        </div>
 
         <div className="contact-list">
-          {contactList.map((contact) => (
-            <button key={contact.name} className={`contact-item ${selectedContact?.name === contact.name ? 'active' : ''}`} onClick={() => setSelectedContact(contact)}>
-              <span className="avatar">{contact.avatar}</span>
-              <span className="contact-main">
+          {contacts.map((contact) => (
+            <button
+              key={contact.id}
+              className={`contact-card ${selectedContact?.id === contact.id ? 'active' : ''}`}
+              onClick={() => setSelectedContact(contact)}
+            >
+              <div className="avatar">{contact.avatar}</div>
+              <div className="contact-meta">
                 <strong>{contact.name}</strong>
-                <small>{contact.status}</small>
-              </span>
+                <span>{contact.status}</span>
+              </div>
             </button>
           ))}
         </div>
       </aside>
 
-      <main className="chat-panel">
+      <main className="chat-area">
         {selectedContact ? (
           <>
-            <header className="chat-header">
+            <div className="chat-header">
               <div>
-                <h2>{selectedContact.name}</h2>
+                <h3>{selectedContact.name}</h3>
                 <span>{selectedContact.status}</span>
               </div>
-              <div className="call-meta">{callState}</div>
-            </header>
 
-            <div className="video-panel">
-              <video ref={localVideoRef} autoPlay muted playsInline />
-              <video ref={remoteVideoRef} autoPlay playsInline />
+              <div className="call-actions">
+                <button className="primary" onClick={() => callUser(selectedContact)}>
+                  {isCalling ? 'Calling...' : 'Start call'}
+                </button>
+                <button className="secondary" onClick={endCall}>
+                  End call
+                </button>
+              </div>
             </div>
 
-            <div className="call-actions">
-              <button className="primary" onClick={startVideoCall}>Start call</button>
-              <button className="secondary" onClick={leaveCall}>Leave call</button>
+            {incomingCall && (
+              <div className="incoming-call-banner">
+                <span>Incoming call from {incomingCall}</span>
+                <button className="primary" onClick={acceptIncomingCall}>
+                  Accept
+                </button>
+                <button className="secondary" onClick={endCall}>
+                  Decline
+                </button>
+              </div>
+            )}
+
+            <div className="video-grid">
+              <div className="video-card">
+                <video ref={localVideoRef} autoPlay playsInline muted />
+                <span>Me</span>
+              </div>
+
+              <div className="video-card">
+                <video ref={remoteVideoRef} autoPlay playsInline />
+                <span>{selectedContact.name}</span>
+              </div>
             </div>
 
-            <div className="message-list">
-              {visibleMessages.map((message) => (
-                <div key={message.id} className={`message ${message.from === user.name ? 'self' : 'other'}`}>
-                  <strong>{message.from}</strong>
-                  <p>{message.text}</p>
-                  <small>{new Date(message.timestamp).toLocaleTimeString()}</small>
-                </div>
-              ))}
+            <div className="messages">
+              {messages
+                .filter(
+                  (msg) =>
+                    (msg.from === username && msg.to === selectedContact.name) ||
+                    (msg.to === username && msg.from === selectedContact.name)
+                )
+                .map((msg) => (
+                  <div
+                    key={msg.id}
+                    className={`message-row ${msg.from === username ? 'mine' : ''}`}
+                  >
+                    <div className="message-bubble">
+                      <span>{msg.text}</span>
+                      <small>{new Date(msg.timestamp).toLocaleTimeString()}</small>
+                    </div>
+                  </div>
+                ))}
             </div>
 
             <div className="composer">
-              <input value={text} onChange={(event) => setText(event.target.value)} placeholder="Type a message..." onKeyDown={(event) => { if (event.key === 'Enter') sendMessage(); }} />
-              <button onClick={sendMessage}>Send</button>
+              <input
+                value={messageText}
+                onChange={(e) => setMessageText(e.target.value)}
+                placeholder={`Message ${selectedContact.name}...`}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleSendMessage();
+                }}
+              />
+              <button className="primary" onClick={handleSendMessage}>
+                Send
+              </button>
             </div>
           </>
         ) : (
-          <div className="empty-state">Choose a contact to begin.</div>
+          <div className="empty-state">
+            <h3>Select a contact</h3>
+            <p>Choose someone from the left panel to start chatting.</p>
+          </div>
         )}
       </main>
     </div>
