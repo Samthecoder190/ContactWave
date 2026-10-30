@@ -11,6 +11,8 @@ import {
   clearPendingOtp,
   saveMessage,
   getConversationBetween,
+  listUsers,
+  listMessages,
 } from './db.js';
 
 const app = express();
@@ -26,13 +28,18 @@ const PORT = process.env.PORT || 4000;
 app.use(cors());
 app.use(express.json());
 
-const contacts = [
-  { id: 1, name: 'Ava', status: 'Online', avatar: 'A' },
-  { id: 2, name: 'Leo', status: 'Away', avatar: 'L' },
-  { id: 3, name: 'Maya', status: 'Online', avatar: 'M' },
-  { id: 4, name: 'Noah', status: 'Offline', avatar: 'N' },
-  { id: 5, name: 'Sofia', status: 'Online', avatar: 'S' },
+const sampleUsers = [
+  { id: 'ava', name: 'Ava', email: 'ava@example.com', phone: '+15550000001', provider: 'google' },
+  { id: 'leo', name: 'Leo', email: 'leo@example.com', phone: '+15550000002', provider: 'phone' },
+  { id: 'maya', name: 'Maya', email: 'maya@example.com', phone: '+15550000003', provider: 'google' },
 ];
+
+for (const user of sampleUsers) {
+  const existing = listUsers().find((item) => item.email === user.email || item.phone === user.phone);
+  if (!existing) {
+    upsertUser(user);
+  }
+}
 
 const users = new Map();
 const socketToUser = new Map();
@@ -59,18 +66,14 @@ app.get('/api/health', (_, res) => {
   res.json({ status: 'ok' });
 });
 
-app.get('/api/contacts', (_, res) => {
-  res.json(contacts);
-});
-
 app.get('/api/users', (_, res) => {
-  const allUsers = awaitUsers();
+  const allUsers = listUsers();
   res.json(allUsers.map(toPublicUser));
 });
 
 app.get('/api/messages/:from/:to', (req, res) => {
   const { from, to } = req.params;
-  const conversation = getConversationBetween(from, to);
+  const conversation = getConversationBetween(decodeURIComponent(from), decodeURIComponent(to));
   res.json(conversation);
 });
 
@@ -98,7 +101,25 @@ app.post('/api/auth/google', (req, res) => {
   });
 });
 
-app.post('/api/auth/phone', (req, res) => {
+app.post('/api/auth/phone/request', (req, res) => {
+  const { phone, name } = req.body || {};
+  const normalizedPhone = normalizePhone(phone);
+
+  if (!normalizedPhone) {
+    return res.status(400).json({ message: 'Provide a valid phone number.' });
+  }
+
+  const demoCode = '123456';
+  setPendingOtp(normalizedPhone, demoCode);
+
+  return res.json({
+    ok: true,
+    message: 'OTP sent successfully.',
+    demoCode,
+  });
+});
+
+app.post('/api/auth/phone/verify', (req, res) => {
   const { phone, otp, name } = req.body || {};
   const normalizedPhone = normalizePhone(phone);
 
@@ -106,18 +127,8 @@ app.post('/api/auth/phone', (req, res) => {
     return res.status(400).json({ message: 'Provide a valid phone number.' });
   }
 
-  if (!otp) {
-    const demoCode = '123456';
-    setPendingOtp(normalizedPhone, demoCode);
-    return res.json({
-      ok: true,
-      message: 'OTP sent successfully.',
-      demoCode,
-    });
-  }
-
   const expectedCode = getPendingOtp(normalizedPhone) || '123456';
-  if (String(otp).trim() !== expectedCode) {
+  if (String(otp || '').trim() !== expectedCode) {
     return res.status(401).json({ message: 'Invalid OTP.' });
   }
 
@@ -131,7 +142,6 @@ app.post('/api/auth/phone', (req, res) => {
   });
 
   clearPendingOtp(normalizedPhone);
-
   return res.json({
     token: generateToken('phone'),
     user: toPublicUser(user),
@@ -148,7 +158,6 @@ app.post('/api/messages', (req, res) => {
       timestamp: new Date().toISOString(),
     });
 
-    // Broadcast to Socket.IO recipients if they are connected.
     io.emit('receive-message', message);
     res.json(message);
   } catch (error) {
@@ -156,11 +165,9 @@ app.post('/api/messages', (req, res) => {
   }
 });
 
-const awaitUsers = () => {
-  const current = []; 
-  const stored = globalThis.__CONTACTWAVE_USERS__ || [];
-  return current.length ? current : stored;
-};
+app.get('/api/messages', (_, res) => {
+  res.json(listMessages());
+});
 
 io.on('connection', (socket) => {
   socket.on('register', (user) => {
@@ -195,7 +202,7 @@ io.on('connection', (socket) => {
     try {
       saveMessage(payload);
     } catch {
-      // Ignore storage error for demo runtime; still emit message.
+      // ignore errors and still relay in real time
     }
 
     socket.emit('receive-message', payload);

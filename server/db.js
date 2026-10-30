@@ -4,7 +4,7 @@ import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const dataDir = path.join(__dirname, '..', 'data');
+const dataDir = path.join(__dirname, 'data');
 const usersFile = path.join(dataDir, 'users.json');
 const messagesFile = path.join(dataDir, 'messages.json');
 const otpsFile = path.join(dataDir, 'otps.json');
@@ -19,7 +19,8 @@ const ensureFile = (filePath, defaultValue) => {
 const readJson = (filePath, fallback) => {
   try {
     const file = fs.readFileSync(filePath, 'utf8');
-    return JSON.parse(file || 'null') ?? fallback;
+    const parsed = JSON.parse(file || 'null');
+    return parsed ?? fallback;
   } catch {
     return fallback;
   }
@@ -41,29 +42,25 @@ export const listUsers = () => {
   return readJson(usersFile, []);
 };
 
-export const listMessages = () => {
-  ensureStore();
-  return readJson(messagesFile, []);
-};
-
 export const getUserByEmail = (email) => {
   if (!email) return null;
-  return listUsers().find((user) => user.email && user.email.toLowerCase() === email.toLowerCase()) || null;
+  return listUsers().find((user) => user.email && user.email.toLowerCase() === String(email).toLowerCase()) || null;
 };
 
 export const getUserByPhone = (phone) => {
   if (!phone) return null;
-  return listUsers().find((user) => user.phone && user.phone === phone) || null;
+  return listUsers().find((user) => user.phone && user.phone === String(phone)) || null;
 };
 
 export const upsertUser = ({ id, name, email, phone, provider, image }) => {
+  ensureStore();
   const users = listUsers();
 
   const match = users.find(
     (user) =>
+      (id && user.id === String(id)) ||
       (email && user.email && user.email.toLowerCase() === String(email).toLowerCase()) ||
-      (phone && user.phone && user.phone === String(phone)) ||
-      (id && user.id === String(id)),
+      (phone && user.phone && user.phone === String(phone)),
   );
 
   const normalizedUser = {
@@ -78,8 +75,8 @@ export const upsertUser = ({ id, name, email, phone, provider, image }) => {
   };
 
   if (match) {
-    const updatedUsers = users.map((user) => (user.id === match.id ? normalizedUser : user));
-    writeJson(usersFile, updatedUsers);
+    const next = users.map((user) => (user.id === match.id ? normalizedUser : user));
+    writeJson(usersFile, next);
     return normalizedUser;
   }
 
@@ -89,6 +86,7 @@ export const upsertUser = ({ id, name, email, phone, provider, image }) => {
 };
 
 export const saveMessage = (message) => {
+  ensureStore();
   const messages = listMessages();
   const record = {
     id: message.id || crypto.randomUUID(),
@@ -105,6 +103,11 @@ export const saveMessage = (message) => {
   messages.push(record);
   writeJson(messagesFile, messages);
   return record;
+};
+
+export const listMessages = () => {
+  ensureStore();
+  return readJson(messagesFile, []);
 };
 
 export const getConversationBetween = (from, to) => {
