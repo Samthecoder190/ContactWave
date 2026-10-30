@@ -1,20 +1,13 @@
 import express from 'express';
 import http from 'http';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import cors from 'cors';
 import { Server } from 'socket.io';
-import {
-  upsertUser,
-  getUserByEmail,
-  getUserByPhone,
-  setPendingOtp,
-  getPendingOtp,
-  clearPendingOtp,
-  saveMessage,
-  getConversationBetween,
-  listUsers,
-  listMessages,
-} from './db.js';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -24,167 +17,39 @@ const io = new Server(server, {
 });
 
 const PORT = process.env.PORT || 4000;
+const frontendDist = path.resolve(__dirname, '../client/dist');
 
 app.use(cors());
 app.use(express.json());
 
-const sampleUsers = [
-  { id: 'ava', name: 'Ava', email: 'ava@example.com', phone: '+15550000001', provider: 'google' },
-  { id: 'leo', name: 'Leo', email: 'leo@example.com', phone: '+15550000002', provider: 'phone' },
-  { id: 'maya', name: 'Maya', email: 'maya@example.com', phone: '+15550000003', provider: 'google' },
+const contacts = [
+  { id: 1, name: 'Ava', status: 'Online', avatar: 'A' },
+  { id: 2, name: 'Leo', status: 'Away', avatar: 'L' },
+  { id: 3, name: 'Maya', status: 'Online', avatar: 'M' },
+  { id: 4, name: 'Noah', status: 'Offline', avatar: 'N' },
+  { id: 5, name: 'Sofia', status: 'Online', avatar: 'S' },
 ];
-
-for (const user of sampleUsers) {
-  const existing = listUsers().find((item) => item.email === user.email || item.phone === user.phone);
-  if (!existing) {
-    upsertUser(user);
-  }
-}
 
 const users = new Map();
 const socketToUser = new Map();
-
-const generateToken = (seed) => `${seed}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-
-const normalizePhone = (input) => {
-  const value = String(input || '').replace(/\D/g, '');
-  return value.length >= 10 ? `+${value}` : null;
-};
-
-const toPublicUser = (user) => ({
-  id: user.id,
-  name: user.name,
-  email: user.email || null,
-  phone: user.phone || null,
-  provider: user.provider || 'local',
-  image: user.image || null,
-  createdAt: user.createdAt,
-  updatedAt: user.updatedAt,
-});
 
 app.get('/api/health', (_, res) => {
   res.json({ status: 'ok' });
 });
 
-app.get('/api/users', (_, res) => {
-  const allUsers = listUsers();
-  res.json(allUsers.map(toPublicUser));
-});
-
-app.get('/api/messages/:from/:to', (req, res) => {
-  const { from, to } = req.params;
-  const conversation = getConversationBetween(decodeURIComponent(from), decodeURIComponent(to));
-  res.json(conversation);
-});
-
-app.post('/api/auth/google', (req, res) => {
-  const { name, email } = req.body || {};
-  const cleanName = String(name || '').trim();
-  const cleanEmail = String(email || '').trim().toLowerCase();
-
-  if (!cleanEmail || !cleanName) {
-    return res.status(400).json({ message: 'Google name and email are required.' });
-  }
-
-  const existingUser = getUserByEmail(cleanEmail);
-  const user = upsertUser({
-    id: existingUser?.id,
-    name: cleanName,
-    email: cleanEmail,
-    phone: existingUser?.phone || null,
-    provider: 'google',
-  });
-
-  return res.json({
-    token: generateToken('google'),
-    user: toPublicUser(user),
-  });
-});
-
-app.post('/api/auth/phone/request', (req, res) => {
-  const { phone, name } = req.body || {};
-  const normalizedPhone = normalizePhone(phone);
-
-  if (!normalizedPhone) {
-    return res.status(400).json({ message: 'Provide a valid phone number.' });
-  }
-
-  const demoCode = '123456';
-  setPendingOtp(normalizedPhone, demoCode);
-
-  return res.json({
-    ok: true,
-    message: 'OTP sent successfully.',
-    demoCode,
-  });
-});
-
-app.post('/api/auth/phone/verify', (req, res) => {
-  const { phone, otp, name } = req.body || {};
-  const normalizedPhone = normalizePhone(phone);
-
-  if (!normalizedPhone) {
-    return res.status(400).json({ message: 'Provide a valid phone number.' });
-  }
-
-  const expectedCode = getPendingOtp(normalizedPhone) || '123456';
-  if (String(otp || '').trim() !== expectedCode) {
-    return res.status(401).json({ message: 'Invalid OTP.' });
-  }
-
-  const existingUser = getUserByPhone(normalizedPhone);
-  const user = upsertUser({
-    id: existingUser?.id,
-    name: String(name || existingUser?.name || 'Phone User').trim() || 'Phone User',
-    email: existingUser?.email || null,
-    phone: normalizedPhone,
-    provider: 'phone',
-  });
-
-  clearPendingOtp(normalizedPhone);
-  return res.json({
-    token: generateToken('phone'),
-    user: toPublicUser(user),
-  });
-});
-
-app.post('/api/messages', (req, res) => {
-  try {
-    const { from, to, text } = req.body || {};
-    const message = saveMessage({
-      from: String(from || '').trim(),
-      to: String(to || '').trim(),
-      text: String(text || '').trim(),
-      timestamp: new Date().toISOString(),
-    });
-
-    io.emit('receive-message', message);
-    res.json(message);
-  } catch (error) {
-    res.status(400).json({ message: error.message || 'Failed to save message.' });
-  }
-});
-
-app.get('/api/messages', (_, res) => {
-  res.json(listMessages());
+app.get('/api/contacts', (_, res) => {
+  res.json(contacts);
 });
 
 io.on('connection', (socket) => {
-  socket.on('register', (user) => {
-    const safeUser = {
-      id: user?.id || socket.id,
-      name: String(user?.name || 'Guest').trim() || 'Guest',
-      email: user?.email || null,
-      phone: user?.phone || null,
-      provider: user?.provider || 'anonymous',
-    };
+  socket.on('register', (username) => {
+    const cleanName = String(username || 'Guest').trim() || 'Guest';
+    users.set(socket.id, { username: cleanName });
+    socketToUser.set(cleanName, socket.id);
 
-    users.set(socket.id, safeUser);
-    socketToUser.set(safeUser.name, socket.id);
-
-    socket.emit('registered', { user: safeUser });
-    socket.broadcast.emit('presence', { username: safeUser.name, online: true });
-    io.emit('user-status', { username: safeUser.name, online: true });
+    socket.emit('registered', { username: cleanName });
+    socket.broadcast.emit('presence', { username: cleanName, online: true });
+    io.emit('user-status', { username: cleanName, online: true });
   });
 
   socket.on('send-message', ({ from, to, text }) => {
@@ -198,12 +63,6 @@ io.on('connection', (socket) => {
       text: trimmed,
       timestamp: new Date().toISOString(),
     };
-
-    try {
-      saveMessage(payload);
-    } catch {
-      // ignore errors and still relay in real time
-    }
 
     socket.emit('receive-message', payload);
 
@@ -244,13 +103,24 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     const user = users.get(socket.id);
     if (user) {
-      socketToUser.delete(user.name);
+      socketToUser.delete(user.username);
       users.delete(socket.id);
-      io.emit('user-status', { username: user.name, online: false });
-      socket.broadcast.emit('presence', { username: user.name, online: false });
+      io.emit('user-status', { username: user.username, online: false });
+      socket.broadcast.emit('presence', { username: user.username, online: false });
     }
   });
 });
+
+if (fs.existsSync(frontendDist)) {
+  app.use(express.static(frontendDist));
+
+  app.get(/^(?!\/api).*/, (req, res, next) => {
+    if (req.originalUrl.startsWith('/api')) {
+      return next();
+    }
+    res.sendFile(path.join(frontendDist, 'index.html'));
+  });
+}
 
 server.listen(PORT, () => {
   console.log(`ContactWave server running on http://localhost:${PORT}`);
