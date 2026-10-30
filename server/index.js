@@ -26,6 +26,23 @@ const contacts = [
 
 const users = new Map();
 const socketToUser = new Map();
+const authUsers = new Map();
+const pendingOtp = new Map();
+
+const generateToken = (seed) => `${seed}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+const makeUser = ({ name, email, phone }) => ({
+  id: `user-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+  name: String(name || 'ContactWave User').trim() || 'ContactWave User',
+  email: email ? String(email).trim().toLowerCase() : null,
+  phone: phone ? String(phone).trim() : null,
+  provider: email ? 'google' : 'phone',
+});
+
+const normalizePhone = (input) => {
+  const value = String(input || '').replace(/\D/g, '');
+  return value.length >= 10 ? `+${value}` : null;
+};
 
 app.get('/api/health', (_, res) => {
   res.json({ status: 'ok' });
@@ -35,15 +52,82 @@ app.get('/api/contacts', (_, res) => {
   res.json(contacts);
 });
 
-io.on('connection', (socket) => {
-  socket.on('register', (username) => {
-    const cleanName = String(username || 'Guest').trim() || 'Guest';
-    users.set(socket.id, { username: cleanName });
-    socketToUser.set(cleanName, socket.id);
+app.post('/api/auth/google', (req, res) => {
+  const { name, email } = req.body || {};
+  const cleanName = String(name || '').trim();
+  const cleanEmail = String(email || '').trim().toLowerCase();
 
-    socket.emit('registered', { username: cleanName });
-    socket.broadcast.emit('presence', { username: cleanName, online: true });
-    io.emit('user-status', { username: cleanName, online: true });
+  if (!cleanEmail || !cleanName) {
+    return res.status(400).json({ message: 'Google name and email are required.' });
+  }
+
+  const existingUser = authUsers.get(`google:${cleanEmail}`) || [...authUsers.values()].find((user) => user.email === cleanEmail);
+  const user = existingUser || makeUser({ name: cleanName, email: cleanEmail, phone: null });
+
+  user.name = cleanName;
+  user.email = cleanEmail;
+  user.provider = 'google';
+  authUsers.set(`google:${cleanEmail}`, user);
+
+  return res.json({
+    token: generateToken('google'),
+    user,
+  });
+});
+
+app.post('/api/auth/phone', (req, res) => {
+  const { phone, otp, name } = req.body || {};
+  const normalizedPhone = normalizePhone(phone);
+
+  if (!normalizedPhone) {
+    return res.status(400).json({ message: 'Provide a valid phone number.' });
+  }
+
+  if (!otp) {
+    const demoCode = '123456';
+    pendingOtp.set(normalizedPhone, demoCode);
+    return res.json({
+      ok: true,
+      message: 'OTP sent successfully.',
+      demoCode,
+    });
+  }
+
+  const expectedCode = pendingOtp.get(normalizedPhone) || '123456';
+  if (String(otp).trim() !== expectedCode) {
+    return res.status(401).json({ message: 'Invalid OTP.' });
+  }
+
+  const existingUser = authUsers.get(`phone:${normalizedPhone}`) || [...authUsers.values()].find((user) => user.phone === normalizedPhone);
+  const user = existingUser || makeUser({ name: name || 'Phone User', email: null, phone: normalizedPhone });
+
+  user.name = String(name || user.name || 'Phone User').trim() || 'Phone User';
+  user.phone = normalizedPhone;
+  user.provider = 'phone';
+  authUsers.set(`phone:${normalizedPhone}`, user);
+
+  return res.json({
+    token: generateToken('phone'),
+    user,
+  });
+});
+
+io.on('connection', (socket) => {
+  socket.on('register', (user) => {
+    const safeUser = {
+      id: user?.id || socket.id,
+      name: String(user?.name || 'Guest').trim() || 'Guest',
+      email: user?.email || null,
+      phone: user?.phone || null,
+      provider: user?.provider || 'anonymous',
+    };
+
+    users.set(socket.id, safeUser);
+    socketToUser.set(safeUser.name, socket.id);
+
+    socket.emit('registered', { user: safeUser });
+    socket.broadcast.emit('presence', { username: safeUser.name, online: true });
+    io.emit('user-status', { username: safeUser.name, online: true });
   });
 
   socket.on('send-message', ({ from, to, text }) => {
@@ -97,10 +181,10 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     const user = users.get(socket.id);
     if (user) {
-      socketToUser.delete(user.username);
+      socketToUser.delete(user.name);
       users.delete(socket.id);
-      io.emit('user-status', { username: user.username, online: false });
-      socket.broadcast.emit('presence', { username: user.username, online: false });
+      io.emit('user-status', { username: user.name, online: false });
+      socket.broadcast.emit('presence', { username: user.name, online: false });
     }
   });
 });
