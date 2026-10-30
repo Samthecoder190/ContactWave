@@ -8,6 +8,7 @@ import { Server } from 'socket.io';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -64,12 +65,12 @@ io.on('connection', (socket) => {
       timestamp: new Date().toISOString(),
     };
 
-    socket.emit('receive-message', payload);
-
     const targetSocketId = socketToUser.get(to);
-    if (targetSocketId && targetSocketId !== socket.id) {
+    if (targetSocketId) {
       io.to(targetSocketId).emit('receive-message', payload);
     }
+
+    socket.emit('receive-message', payload);
   });
 
   socket.on('start-call', ({ from, to }) => {
