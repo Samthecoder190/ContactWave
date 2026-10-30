@@ -2,6 +2,16 @@ import express from 'express';
 import http from 'http';
 import cors from 'cors';
 import { Server } from 'socket.io';
+import {
+  upsertUser,
+  getUserByEmail,
+  getUserByPhone,
+  setPendingOtp,
+  getPendingOtp,
+  clearPendingOtp,
+  saveMessage,
+  getConversationBetween,
+} from './db.js';
 
 const app = express();
 const server = http.createServer(app);
@@ -26,23 +36,24 @@ const contacts = [
 
 const users = new Map();
 const socketToUser = new Map();
-const authUsers = new Map();
-const pendingOtp = new Map();
 
 const generateToken = (seed) => `${seed}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-
-const makeUser = ({ name, email, phone }) => ({
-  id: `user-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
-  name: String(name || 'ContactWave User').trim() || 'ContactWave User',
-  email: email ? String(email).trim().toLowerCase() : null,
-  phone: phone ? String(phone).trim() : null,
-  provider: email ? 'google' : 'phone',
-});
 
 const normalizePhone = (input) => {
   const value = String(input || '').replace(/\D/g, '');
   return value.length >= 10 ? `+${value}` : null;
 };
+
+const toPublicUser = (user) => ({
+  id: user.id,
+  name: user.name,
+  email: user.email || null,
+  phone: user.phone || null,
+  provider: user.provider || 'local',
+  image: user.image || null,
+  createdAt: user.createdAt,
+  updatedAt: user.updatedAt,
+});
 
 app.get('/api/health', (_, res) => {
   res.json({ status: 'ok' });
@@ -50,6 +61,17 @@ app.get('/api/health', (_, res) => {
 
 app.get('/api/contacts', (_, res) => {
   res.json(contacts);
+});
+
+app.get('/api/users', (_, res) => {
+  const allUsers = awaitUsers();
+  res.json(allUsers.map(toPublicUser));
+});
+
+app.get('/api/messages/:from/:to', (req, res) => {
+  const { from, to } = req.params;
+  const conversation = getConversationBetween(from, to);
+  res.json(conversation);
 });
 
 app.post('/api/auth/google', (req, res) => {
@@ -61,17 +83,18 @@ app.post('/api/auth/google', (req, res) => {
     return res.status(400).json({ message: 'Google name and email are required.' });
   }
 
-  const existingUser = authUsers.get(`google:${cleanEmail}`) || [...authUsers.values()].find((user) => user.email === cleanEmail);
-  const user = existingUser || makeUser({ name: cleanName, email: cleanEmail, phone: null });
-
-  user.name = cleanName;
-  user.email = cleanEmail;
-  user.provider = 'google';
-  authUsers.set(`google:${cleanEmail}`, user);
+  const existingUser = getUserByEmail(cleanEmail);
+  const user = upsertUser({
+    id: existingUser?.id,
+    name: cleanName,
+    email: cleanEmail,
+    phone: existingUser?.phone || null,
+    provider: 'google',
+  });
 
   return res.json({
     token: generateToken('google'),
-    user,
+    user: toPublicUser(user),
   });
 });
 
@@ -85,7 +108,7 @@ app.post('/api/auth/phone', (req, res) => {
 
   if (!otp) {
     const demoCode = '123456';
-    pendingOtp.set(normalizedPhone, demoCode);
+    setPendingOtp(normalizedPhone, demoCode);
     return res.json({
       ok: true,
       message: 'OTP sent successfully.',
@@ -93,24 +116,51 @@ app.post('/api/auth/phone', (req, res) => {
     });
   }
 
-  const expectedCode = pendingOtp.get(normalizedPhone) || '123456';
+  const expectedCode = getPendingOtp(normalizedPhone) || '123456';
   if (String(otp).trim() !== expectedCode) {
     return res.status(401).json({ message: 'Invalid OTP.' });
   }
 
-  const existingUser = authUsers.get(`phone:${normalizedPhone}`) || [...authUsers.values()].find((user) => user.phone === normalizedPhone);
-  const user = existingUser || makeUser({ name: name || 'Phone User', email: null, phone: normalizedPhone });
+  const existingUser = getUserByPhone(normalizedPhone);
+  const user = upsertUser({
+    id: existingUser?.id,
+    name: String(name || existingUser?.name || 'Phone User').trim() || 'Phone User',
+    email: existingUser?.email || null,
+    phone: normalizedPhone,
+    provider: 'phone',
+  });
 
-  user.name = String(name || user.name || 'Phone User').trim() || 'Phone User';
-  user.phone = normalizedPhone;
-  user.provider = 'phone';
-  authUsers.set(`phone:${normalizedPhone}`, user);
+  clearPendingOtp(normalizedPhone);
 
   return res.json({
     token: generateToken('phone'),
-    user,
+    user: toPublicUser(user),
   });
 });
+
+app.post('/api/messages', (req, res) => {
+  try {
+    const { from, to, text } = req.body || {};
+    const message = saveMessage({
+      from: String(from || '').trim(),
+      to: String(to || '').trim(),
+      text: String(text || '').trim(),
+      timestamp: new Date().toISOString(),
+    });
+
+    // Broadcast to Socket.IO recipients if they are connected.
+    io.emit('receive-message', message);
+    res.json(message);
+  } catch (error) {
+    res.status(400).json({ message: error.message || 'Failed to save message.' });
+  }
+});
+
+const awaitUsers = () => {
+  const current = []; 
+  const stored = globalThis.__CONTACTWAVE_USERS__ || [];
+  return current.length ? current : stored;
+};
 
 io.on('connection', (socket) => {
   socket.on('register', (user) => {
@@ -141,6 +191,12 @@ io.on('connection', (socket) => {
       text: trimmed,
       timestamp: new Date().toISOString(),
     };
+
+    try {
+      saveMessage(payload);
+    } catch {
+      // Ignore storage error for demo runtime; still emit message.
+    }
 
     socket.emit('receive-message', payload);
 
