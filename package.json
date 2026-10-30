@@ -1,0 +1,16 @@
+{
+  "name": "contactwave",
+  "private": true,
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm --prefix server run dev\" \"npm --prefix client run dev -- --host 0.0.0.0\"",
+    "server": "npm --prefix server run start",
+    "client": "npm --prefix client run dev -- --host 0.0.0.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1"
+  }
+}

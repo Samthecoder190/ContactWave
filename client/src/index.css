@@ -1,0 +1,331 @@
+import { useEffect, useRef, useState } from 'react';
+import { io, type Socket } from 'socket.io-client';
+
+type Contact = {
+  id: number;
+  name: string;
+  status: string;
+  avatar: string;
+};
+
+type ChatMessage = {
+  id: string;
+  from: string;
+  to: string;
+  text: string;
+  timestamp: string;
+};
+
+const serverUrl = 'http://localhost:4000';
+
+export default function App() {
+  const [username, setUsername] = useState('');
+  const [contacts, setContacts] = useState<Contact[]>([]);
+  const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [draft, setDraft] = useState('');
+  const [socket, setSocket] = useState<Socket | null>(null);
+  const [callState, setCallState] = useState('Idle');
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+
+  const localVideoRef = useRef<HTMLVideoElement | null>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+
+  useEffect(() => {
+    const fetchContacts = async () => {
+      const response = await fetch(`${serverUrl}/api/contacts`);
+      const data = await response.json();
+      setContacts(data);
+      if (data[0]) setSelectedContact(data[0]);
+    };
+
+    fetchContacts();
+  }, []);
+
+  useEffect(() => {
+    if (localStream && localVideoRef.current) {
+      localVideoRef.current.srcObject = localStream;
+    }
+  }, [localStream]);
+
+  useEffect(() => {
+    if (remoteStream && remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = remoteStream;
+    }
+  }, [remoteStream]);
+
+  useEffect(() => {
+    return () => {
+      if (socket) {
+        socket.disconnect();
+      }
+      if (peerConnectionRef.current) {
+        peerConnectionRef.current.close();
+      }
+      if (localStream) {
+        localStream.getTracks().forEach((track) => track.stop());
+      }
+    };
+  }, [socket, localStream]);
+
+  const connectSocket = (userName: string) => {
+    const newSocket = io(serverUrl);
+
+    newSocket.on('connect', () => {
+      newSocket.emit('register', userName);
+    });
+
+    newSocket.on('receive-message', (message: ChatMessage) => {
+      setMessages((prev) => [...prev, message]);
+    });
+
+    newSocket.on('incoming-call', ({ from }) => {
+      setCallState(`Incoming call from ${from}`);
+    });
+
+    newSocket.on('incoming-offer', async ({ from, offer }) => {
+      await handleIncomingOffer(from, offer);
+    });
+
+    newSocket.on('incoming-answer', async ({ from, answer }) => {
+      if (!peerConnectionRef.current) return;
+      await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(answer));
+      setCallState(`Connected with ${from}`);
+    });
+
+    newSocket.on('incoming-ice-candidate', async ({ from, candidate }) => {
+      if (!peerConnectionRef.current || !candidate) return;
+      try {
+        await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (error) {
+        console.error('Error adding ICE candidate', error);
+      }
+    });
+
+    setSocket(newSocket);
+  };
+
+  const ensureLocalStream = async () => {
+    if (localStream) return localStream;
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: true,
+    });
+
+    setLocalStream(stream);
+    return stream;
+  };
+
+  const createPeerConnection = async (remoteUserName: string) => {
+    const stream = await ensureLocalStream();
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    });
+
+    stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+    peerConnectionRef.current = pc;
+
+    pc.onicecandidate = ({ candidate }) => {
+      if (candidate && socket) {
+        socket.emit('ice-candidate', {
+          from: username || 'Guest',
+          to: remoteUserName,
+          candidate,
+        });
+      }
+    };
+
+    pc.ontrack = (event) => {
+      const [remoteMediaStream] = event.streams;
+      setRemoteStream(remoteMediaStream);
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'connected') {
+        setCallState(`Connected with ${remoteUserName}`);
+      }
+    };
+
+    return pc;
+  };
+
+  const handleIncomingOffer = async (from: string, offer: RTCSessionDescriptionInit) => {
+    const pc = await createPeerConnection(from);
+    await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+
+    if (socket) {
+      socket.emit('answer', {
+        from: username || 'Guest',
+        to: from,
+        answer: pc.localDescription,
+      });
+    }
+
+    setCallState(`Connected with ${from}`);
+  };
+
+  const startVideoCall = async () => {
+    if (!selectedContact || !socket) return;
+
+    const remoteUserName = selectedContact.name;
+    const pc = await createPeerConnection(remoteUserName);
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    socket.emit('start-call', {
+      from: username || 'Guest',
+      to: remoteUserName,
+    });
+
+    socket.emit('offer', {
+      from: username || 'Guest',
+      to: remoteUserName,
+      offer: pc.localDescription,
+    });
+
+    setCallState(`Calling ${remoteUserName}...`);
+  };
+
+  const leaveCall = () => {
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close();
+      peerConnectionRef.current = null;
+    }
+
+    if (localStream) {
+      localStream.getTracks().forEach((track) => track.stop());
+      setLocalStream(null);
+    }
+
+    setRemoteStream(null);
+    setCallState('Idle');
+  };
+
+  const handleLogin = () => {
+    const userName = username.trim() || 'Guest';
+    setUsername(userName);
+    if (socket) {
+      socket.disconnect();
+    }
+    connectSocket(userName);
+  };
+
+  const sendMessage = () => {
+    if (!selectedContact || !socket || !draft.trim()) return;
+
+    const message: ChatMessage = {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      from: username || 'Guest',
+      to: selectedContact.name,
+      text: draft.trim(),
+      timestamp: new Date().toISOString(),
+    };
+
+    socket.emit('send-message', {
+      from: message.from,
+      to: selectedContact.name,
+      text: message.text,
+    });
+
+    setMessages((prev) => [...prev, message]);
+    setDraft('');
+  };
+
+  const visibleMessages = messages.filter(
+    (message) =>
+      selectedContact &&
+      (message.from === selectedContact.name || message.to === selectedContact.name || message.from === username),
+  );
+
+  return (
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand-block">
+          <span className="logo">C</span>
+          <h1>ContactWave</h1>
+        </div>
+
+        <div className="login-box">
+          <input
+            value={username}
+            onChange={(event) => setUsername(event.target.value)}
+            placeholder="Your name"
+          />
+          <button onClick={handleLogin}>Join</button>
+        </div>
+
+        <div className="contact-list">
+          {contacts.map((contact) => (
+            <button
+              key={contact.id}
+              className={`contact-item ${selectedContact?.id === contact.id ? 'active' : ''}`}
+              onClick={() => setSelectedContact(contact)}
+            >
+              <span className="avatar">{contact.avatar}</span>
+              <span className="contact-main">
+                <strong>{contact.name}</strong>
+                <small>{contact.status}</small>
+              </span>
+            </button>
+          ))}
+        </div>
+      </aside>
+
+      <main className="chat-panel">
+        {selectedContact ? (
+          <>
+            <header className="chat-header">
+              <div>
+                <h2>{selectedContact.name}</h2>
+                <span>{selectedContact.status}</span>
+              </div>
+              <div className="call-meta">{callState}</div>
+            </header>
+
+            <div className="video-panel">
+              <video ref={localVideoRef} autoPlay muted playsInline />
+              <video ref={remoteVideoRef} autoPlay playsInline />
+            </div>
+
+            <div className="call-actions">
+              <button className="primary" onClick={startVideoCall}>Start call</button>
+              <button className="secondary" onClick={leaveCall}>Leave call</button>
+            </div>
+
+            <div className="message-list">
+              {visibleMessages.map((message) => (
+                <div
+                  key={message.id}
+                  className={`message ${message.from === (username || 'Guest') ? 'self' : 'other'}`}
+                >
+                  <strong>{message.from}</strong>
+                  <p>{message.text}</p>
+                  <small>{new Date(message.timestamp).toLocaleTimeString()}</small>
+                </div>
+              ))}
+            </div>
+
+            <div className="composer">
+              <input
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') sendMessage();
+                }}
+                placeholder="Type a message..."
+              />
+              <button onClick={sendMessage}>Send</button>
+            </div>
+          </>
+        ) : (
+          <div className="empty-state">Choose a contact to begin.</div>
+        )}
+      </main>
+    </div>
+  );
+}
