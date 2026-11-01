@@ -21,10 +21,26 @@ const io = new Server(server, {
   },
 });
 
-const PORT = process.env.PORT || 4000;
+const PORT = Number(process.env.PORT) || 4000;
 const frontendDist = path.resolve(__dirname, '../client/dist');
+const allowedOrigins = (process.env.CORS_ORIGIN || '*')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 
-app.use(cors());
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
 
 const contacts = [
@@ -194,4 +210,3 @@ if (fs.existsSync(frontendDist)) {
 server.listen(PORT, () => {
   console.log(`ContactWave server running on http://localhost:${PORT}`);
 });
-
