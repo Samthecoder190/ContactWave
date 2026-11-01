@@ -16,10 +16,13 @@ type Message = {
   timestamp: string;
 };
 
-const API_BASE = 'http://localhost:4000';
+type TabKey = 'messages' | 'contacts' | 'calls';
+
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:4000';
 
 export default function App() {
   const [username, setUsername] = useState('Sam');
+  const [activeTab, setActiveTab] = useState<TabKey>('messages');
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -39,11 +42,32 @@ export default function App() {
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
 
-  useEffect(() => {
-    const socket = io(API_BASE, {
-      transports: ['websocket'],
-    });
+  const ensureMessageOrder = (list: Message[]) =>
+    [...list].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
+  const loadConversation = async (contactName: string) => {
+    if (!contactName) return;
+
+    try {
+      const response = await fetch(
+        `${API_BASE}/api/messages/${encodeURIComponent(username)}/${encodeURIComponent(contactName)}`,
+      );
+
+      if (!response.ok) {
+        setMessages([]);
+        return;
+      }
+
+      const data: Message[] = await response.json();
+      setMessages(ensureMessageOrder(data));
+    } catch (error) {
+      console.error('Failed to load conversation:', error);
+      setMessages([]);
+    }
+  };
+
+  useEffect(() => {
+    const socket = io(API_BASE, { transports: ['websocket'] });
     socketRef.current = socket;
 
     socket.on('connect', () => {
@@ -52,7 +76,10 @@ export default function App() {
     });
 
     socket.on('receive-message', (msg: Message) => {
-      setMessages((prev) => [...prev, msg]);
+      setMessages((prev) => {
+        const alreadyExists = prev.some((item) => item.id === msg.id);
+        return alreadyExists ? prev : ensureMessageOrder([...prev, msg]);
+      });
     });
 
     socket.on('incoming-call', ({ from }) => {
@@ -64,7 +91,7 @@ export default function App() {
       pendingOfferRef.current = offer;
     });
 
-    socket.on('incoming-answer', async ({ from, answer }) => {
+    socket.on('incoming-answer', async ({ answer }) => {
       if (!pcRef.current) return;
 
       try {
@@ -75,7 +102,7 @@ export default function App() {
       }
     });
 
-    socket.on('incoming-ice-candidate', async ({ from, candidate }) => {
+    socket.on('incoming-ice-candidate', async ({ candidate }) => {
       if (!pcRef.current) return;
 
       try {
@@ -88,22 +115,25 @@ export default function App() {
     socket.on('user-status', ({ username: name, online }) => {
       setContacts((prev) =>
         prev.map((contact) =>
-          contact.name === name
-            ? { ...contact, status: online ? 'Online' : 'Offline' }
-            : contact
-        )
+          contact.name === name ? { ...contact, status: online ? 'Online' : 'Offline' } : contact,
+        ),
       );
     });
 
     fetch(`${API_BASE}/api/contacts`)
       .then((res) => res.json())
       .then((data) => setContacts(data))
-      .catch((err) => console.error('Failed to fetch contacts:', err));
+      .catch((error) => console.error('Failed to fetch contacts:', error));
 
     return () => {
       socket.disconnect();
     };
   }, [username]);
+
+  useEffect(() => {
+    if (!selectedContact) return;
+    loadConversation(selectedContact.name);
+  }, [selectedContact, username]);
 
   useEffect(() => {
     if (localVideoRef.current && localStream) {
@@ -125,10 +155,8 @@ export default function App() {
 
     pc.onicecandidate = (event) => {
       if (!event.candidate || !selectedContact) return;
-      const socket = socketRef.current;
-      if (!socket) return;
 
-      socket.emit('ice-candidate', {
+      socketRef.current?.emit('ice-candidate', {
         from: username,
         to: selectedContact.name,
         candidate: event.candidate,
@@ -240,7 +268,7 @@ export default function App() {
       text: payload.text,
     });
 
-    setMessages((prev) => [...prev, payload]);
+    setMessages((prev) => ensureMessageOrder([...prev, payload]));
     setMessageText('');
   };
 
@@ -254,6 +282,27 @@ export default function App() {
             <p>Messaging + Video</p>
           </div>
         </div>
+
+        <nav className="main-menu" aria-label="Main menu">
+          <button
+            className={activeTab === 'messages' ? 'tab-button active' : 'tab-button'}
+            onClick={() => setActiveTab('messages')}
+          >
+            Messages
+          </button>
+          <button
+            className={activeTab === 'contacts' ? 'tab-button active' : 'tab-button'}
+            onClick={() => setActiveTab('contacts')}
+          >
+            Contacts
+          </button>
+          <button
+            className={activeTab === 'calls' ? 'tab-button active' : 'tab-button'}
+            onClick={() => setActiveTab('calls')}
+          >
+            Calls
+          </button>
+        </nav>
 
         <div className="user-box">
           <label>Display name</label>
@@ -279,7 +328,10 @@ export default function App() {
             <button
               key={contact.id}
               className={`contact-card ${selectedContact?.id === contact.id ? 'active' : ''}`}
-              onClick={() => setSelectedContact(contact)}
+              onClick={() => {
+                setSelectedContact(contact);
+                setActiveTab('messages');
+              }}
             >
               <div className="avatar">{contact.avatar}</div>
               <div className="contact-meta">
@@ -339,7 +391,7 @@ export default function App() {
                 .filter(
                   (msg) =>
                     (msg.from === username && msg.to === selectedContact.name) ||
-                    (msg.to === username && msg.from === selectedContact.name)
+                    (msg.to === username && msg.from === selectedContact.name),
                 )
                 .map((msg) => (
                   <div
@@ -370,11 +422,14 @@ export default function App() {
           </>
         ) : (
           <div className="empty-state">
-            <h3>Select a contact</h3>
-            <p>Choose someone from the left panel to start chatting.</p>
+            <div>
+              <h3>Select a contact</h3>
+              <p>Choose someone from the left menu to start chatting.</p>
+            </div>
           </div>
         )}
       </main>
     </div>
   );
 }
+

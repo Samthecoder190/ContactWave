@@ -5,6 +5,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import cors from 'cors';
 import { Server } from 'socket.io';
+import {
+  getConversationBetween,
+  saveMessage,
+} from './db.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -34,6 +38,19 @@ const contacts = [
 const users = new Map();
 const socketToUser = new Map();
 
+const broadcastMessage = (payload) => {
+  const senderSocketId = socketToUser.get(payload.from);
+  const targetSocketId = socketToUser.get(payload.to);
+
+  if (senderSocketId) {
+    io.to(senderSocketId).emit('receive-message', payload);
+  }
+
+  if (targetSocketId && targetSocketId !== senderSocketId) {
+    io.to(targetSocketId).emit('receive-message', payload);
+  }
+};
+
 app.get('/api/health', (_, res) => {
   res.json({ status: 'ok' });
 });
@@ -42,9 +59,57 @@ app.get('/api/contacts', (_, res) => {
   res.json(contacts);
 });
 
+app.get('/api/messages/:from/:to', (req, res) => {
+  const from = decodeURIComponent(req.params.from || '');
+  const to = decodeURIComponent(req.params.to || '');
+
+  if (!from || !to) {
+    return res.status(400).json({ error: 'Missing message participants.' });
+  }
+
+  const conversation = getConversationBetween(from, to);
+  return res.json(conversation);
+});
+
+app.post('/api/messages', (req, res) => {
+  const { from, to, text } = req.body || {};
+  const cleanFrom = String(from || '').trim();
+  const cleanTo = String(to || '').trim();
+  const cleanText = String(text || '').trim();
+
+  if (!cleanFrom || !cleanTo || !cleanText) {
+    return res.status(400).json({ error: 'Message payload is incomplete.' });
+  }
+
+  try {
+    const payload = {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      from: cleanFrom,
+      to: cleanTo,
+      text: cleanText,
+      timestamp: new Date().toISOString(),
+    };
+
+    const savedMessage = saveMessage(payload);
+    broadcastMessage(savedMessage);
+    return res.status(201).json(savedMessage);
+  } catch (error) {
+    console.error('Failed to save message:', error);
+    return res.status(500).json({ error: 'Unable to save message.' });
+  }
+});
+
 io.on('connection', (socket) => {
   socket.on('register', (username) => {
     const cleanName = String(username || 'Guest').trim() || 'Guest';
+
+    if (socketToUser.has(cleanName) && socketToUser.get(cleanName) !== socket.id) {
+      const previousSocketId = socketToUser.get(cleanName);
+      if (previousSocketId) {
+        io.to(previousSocketId).emit('user-status', { username: cleanName, online: false });
+      }
+    }
+
     users.set(socket.id, { username: cleanName });
     socketToUser.set(cleanName, socket.id);
 
@@ -54,23 +119,25 @@ io.on('connection', (socket) => {
   });
 
   socket.on('send-message', ({ from, to, text }) => {
-    const trimmed = String(text || '').trim();
-    if (!trimmed || !to) return;
+    const cleanFrom = String(from || '').trim();
+    const cleanTo = String(to || '').trim();
+    const cleanText = String(text || '').trim();
 
-    const payload = {
-      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      from,
-      to,
-      text: trimmed,
-      timestamp: new Date().toISOString(),
-    };
+    if (!cleanFrom || !cleanTo || !cleanText) return;
 
-    const targetSocketId = socketToUser.get(to);
-    if (targetSocketId) {
-      io.to(targetSocketId).emit('receive-message', payload);
+    try {
+      const payload = saveMessage({
+        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        from: cleanFrom,
+        to: cleanTo,
+        text: cleanText,
+        timestamp: new Date().toISOString(),
+      });
+
+      broadcastMessage(payload);
+    } catch (error) {
+      console.error('Socket message save failed:', error);
     }
-
-    socket.emit('receive-message', payload);
   });
 
   socket.on('start-call', ({ from, to }) => {
@@ -104,10 +171,11 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     const user = users.get(socket.id);
     if (user) {
-      socketToUser.delete(user.username);
+      const { username } = user;
+      socketToUser.delete(username);
       users.delete(socket.id);
-      io.emit('user-status', { username: user.username, online: false });
-      socket.broadcast.emit('presence', { username: user.username, online: false });
+      io.emit('user-status', { username, online: false });
+      socket.broadcast.emit('presence', { username, online: false });
     }
   });
 });
@@ -126,3 +194,4 @@ if (fs.existsSync(frontendDist)) {
 server.listen(PORT, () => {
   console.log(`ContactWave server running on http://localhost:${PORT}`);
 });
+

@@ -70,6 +70,31 @@ button, input {
   font-size: 0.82rem;
 }
 
+.main-menu {
+  display: flex;
+  gap: 8px;
+  padding: 6px;
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.8);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.tab-button {
+  flex: 1;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  padding: 10px 8px;
+  background: transparent;
+  color: #cbd5e1;
+  cursor: pointer;
+  transition: 0.2s ease;
+}
+
+.tab-button.active {
+  background: linear-gradient(135deg, #2563eb, #06b6d4);
+  color: white;
+}
+
 .user-box {
   display: flex;
   flex-direction: column;
@@ -301,3 +326,4 @@ button, input {
   color: #cbd5e1;
   text-align: center;
 }
+
